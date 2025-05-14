@@ -1,0 +1,154 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: certkeystore
+---
+# Create a ClusterIssuer for certificate signing
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: certkeystore-ca-issuer
+spec:
+  selfSigned: {}
+---
+# Create a CA Certificate for signing client certs
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ca-certificate
+  namespace: certkeystore
+spec:
+  isCA: true
+  commonName: "Certkeystore Root CA"
+  secretName: ca-key-pair
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: certkeystore-ca-issuer
+    kind: ClusterIssuer
+---
+# Create a server Certificate for your application
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: server-certificate
+  namespace: certkeystore
+spec:
+  secretName: server-tls
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days
+  commonName: "certkeystore.example.com"
+  dnsNames:
+  - "certkeystore.example.com"
+  - "certkeystore.certkeystore.svc.cluster.local"
+  usages:
+  - server auth
+  issuerRef:
+    name: certkeystore-ca-issuer
+    kind: ClusterIssuer
+---
+# ConfigMap for application properties 
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: certkeystore-config
+  namespace: certkeystore
+data:
+  application.properties: |
+    server.port=8443
+    server.ssl.enabled=true
+    server.ssl.key-store=/mnt/certs/keystore.p12
+    server.ssl.key-store-type=PKCS12
+    server.ssl.key-store-password=changeit
+    server.ssl.key-alias=cert-manager
+    
+    # Trust store for client certificate validation
+    server.ssl.trust-store=/mnt/certs/truststore.p12
+    server.ssl.trust-store-type=PKCS12
+    server.ssl.trust-store-password=changeit
+    
+    # Enable client certificate authentication
+    server.ssl.client-auth=need
+---
+# Deployment for your Spring Boot application
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: certkeystore
+  namespace: certkeystore
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: certkeystore
+  template:
+    metadata:
+      labels:
+        app: certkeystore
+    spec:
+      containers:
+      - name: certkeystore
+        image: riazvm/certkeystore:tagname
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8443
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+        - name: server-certs
+          mountPath: /mnt/certs
+          readOnly: true
+        env:
+        - name: SPRING_CONFIG_LOCATION
+          value: file:/app/config/application.properties
+      volumes:
+      - name: config-volume
+        configMap:
+          name: certkeystore-config
+      - name: server-certs
+        csi:
+          driver: csi.cert-manager.io
+          readOnly: true
+          volumeAttributes:
+            csi.cert-manager.io/issuer-name: certkeystore-ca-issuer
+            csi.cert-manager.io/issuer-kind: ClusterIssuer
+            csi.cert-manager.io/common-name: "certkeystore.certkeystore.svc.cluster.local"
+            csi.cert-manager.io/dns-names: "certkeystore.certkeystore.svc.cluster.local,certkeystore.example.com"
+            csi.cert-manager.io/duration: "8760h" # 1 year
+            csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth"
+            csi.cert-manager.io/pkcs12-enable: "true"
+            csi.cert-manager.io/pkcs12-filename: "keystore.p12"
+            csi.cert-manager.io/pkcs12-password: "changeit"
+            csi.cert-manager.io/ca-file: "ca.crt"
+            csi.cert-manager.io/pkcs12-trust-filename: "truststore.p12" # This stores the CA cert in a truststore
+            csi.cert-manager.io/pkcs12-trust-password: "changeit"
+---
+# Service to expose the deployment
+apiVersion: v1
+kind: Service
+metadata:
+  name: certkeystore
+  namespace: certkeystore
+spec:
+  selector:
+    app: certkeystore
+  ports:
+  - port: 8443
+    targetPort: 8443
+  type: NodePort  # Using NodePort to expose outside cluster
+---
+# Optional: LoadBalancer service for easier external access
+apiVersion: v1
+kind: Service
+metadata:
+  name: certkeystore-lb
+  namespace: certkeystore
+spec:
+  selector:
+    app: certkeystore
+  ports:
+  - port: 8443
+    targetPort: 8443
+  type: LoadBalancer
